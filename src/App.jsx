@@ -51,6 +51,19 @@ const playSound = (type) => {
     gain.gain.setValueAtTime(0.2, now);
     gain.gain.linearRampToValueAtTime(0, now + 0.6);
     osc.start(now); osc.stop(now + 0.6);
+  } else if (type === 'easter_egg') {
+    // Magical ascending arpeggio
+    const notes = [523, 659, 784, 1047, 1319];
+    notes.forEach((freq, i) => {
+      const o2 = actx.createOscillator();
+      const g2 = actx.createGain();
+      o2.connect(g2); g2.connect(actx.destination);
+      o2.type = 'triangle';
+      o2.frequency.setValueAtTime(freq, now + i * 0.09);
+      g2.gain.setValueAtTime(0.18, now + i * 0.09);
+      g2.gain.linearRampToValueAtTime(0, now + i * 0.09 + 0.25);
+      o2.start(now + i * 0.09); o2.stop(now + i * 0.09 + 0.3);
+    });
   }
 };
 
@@ -172,6 +185,16 @@ class GameEngine {
     this.shotsFired = 0;
     this.currentCombo = 0; 
     this.gameOverTaunt = "";
+
+    // Building occlusion rects — populated in draw(), used in shoot()
+    // Each entry: { x, y, w, h }  (canvas logical coords)
+    this.buildingRects = [];
+
+    // ── Easter egg ──────────────────────────────────────────────────
+    // Fixed position on the 5th building (the tall cyan tower at x:332)
+    // Sits just below its billboard, blending with the window row.
+    this.easterEgg = { x: 388, y: 195, r: 9, found: false };
+    this.eggPulse = 0; // drives the subtle shimmer animation
     
     this.mascot = { active: false, y: this.H, type: 'laugh', timer: 0 };
     
@@ -185,6 +208,7 @@ class GameEngine {
     this.round = 1;
     this.currentCombo = 0;
     this.gameOverTaunt = "";
+    this.easterEgg.found = false; // reset so it can be found again next game
     
     // Determine Max Ammo based on Difficulty Level
     if (this.mode === 1) this.maxAmmo = 5; // Easy
@@ -286,7 +310,45 @@ class GameEngine {
   shoot(x, y) {
     if (this.state !== 'PLAYING') return;
     if (this.ammo <= 0) return;
-    
+
+    // Block shot if click is inside a foreground building (target is occluded)
+    const blocked = this.buildingRects.some(
+      r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+    );
+    if (blocked) return;
+
+    // ── Easter egg hit check (before spending ammo, doesn't cost a shot) ──
+    if (!this.easterEgg.found) {
+      const eg = this.easterEgg;
+      if (Math.hypot(x - eg.x, y - eg.y) < eg.r + 8) {
+        eg.found = true;
+        this.score += 500;
+        if (this.score > this.hiScore) {
+          this.hiScore = this.score;
+          localStorage.setItem('retroweb_hi', this.hiScore);
+        }
+        playSound('easter_egg');
+        // Golden screen flash
+        const flashEl = document.getElementById('screen-flash');
+        if (flashEl) {
+          flashEl.style.background = '#ffd700';
+          flashEl.style.opacity = '0.55';
+          setTimeout(() => {
+            flashEl.style.opacity = '0';
+            setTimeout(() => { flashEl.style.background = '#fff'; }, 400);
+          }, 180);
+        }
+        // Floating celebration texts on canvas
+        this.floatingTexts.push({ x: eg.x, y: eg.y - 20, text: '+500 SECRET BONUS!', color: '#ffd700', life: 3.5, isTaunt: false, isEgg: true });
+        this.floatingTexts.push({ x: eg.x, y: eg.y - 44, text: 'EASTER EGG FOUND!',  color: '#ffffff', life: 3.5, isTaunt: false, isEgg: true });
+        // Spawn golden particle burst
+        this.spawnExplosion(eg.x, eg.y, '#ffd700');
+        // Notify React for the achievement overlay
+        this.syncState();
+        return; // finding the egg doesn't cost a shot
+      }
+    }
+
     this.ammo--;
     this.shotsFired++;
     playSound('shoot');
@@ -480,6 +542,9 @@ class GameEngine {
       ft.life -= dt;
     });
     this.floatingTexts = this.floatingTexts.filter(ft => ft.life > 0);
+
+    // Animate egg shimmer
+    this.eggPulse += dt * 2.8;
   }
 
   checkRoundClear() {
@@ -501,74 +566,98 @@ class GameEngine {
 
   draw() {
     const ctx = this.ctx;
+    const W = this.W, H = this.H;
+    const GROUND = H - 75; // y where ground begins
 
-    // ── DAYTIME SKY GRADIENT ──────────────────────────────────────────
-    const sky = ctx.createLinearGradient(0, 0, 0, this.H);
-    sky.addColorStop(0,   '#4fc3f7'); // bright sky blue at top
-    sky.addColorStop(0.5, '#81d4fa'); // lighter mid sky
-    sky.addColorStop(1,   '#b3e5fc'); // pale horizon
+    // ═══════════════════════════════════════════════════════════════
+    // 1. MIDNIGHT SKY
+    // ═══════════════════════════════════════════════════════════════
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0,    '#03010a');
+    sky.addColorStop(0.45, '#08052a');
+    sky.addColorStop(1,    '#0d0635');
     ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, this.W, this.H);
+    ctx.fillRect(0, 0, W, H);
 
-    // ── SUN ──────────────────────────────────────────────────────────
-    // Glow halo
-    const sunX = 110, sunY = 70, sunR = 32;
-    const sunGlow = ctx.createRadialGradient(sunX, sunY, sunR * 0.5, sunX, sunY, sunR * 2.2);
-    sunGlow.addColorStop(0,   'rgba(255, 236, 100, 0.55)');
-    sunGlow.addColorStop(1,   'rgba(255, 236, 100, 0)');
-    ctx.fillStyle = sunGlow;
-    ctx.beginPath(); ctx.arc(sunX, sunY, sunR * 2.2, 0, Math.PI * 2); ctx.fill();
-    // Sun disc
-    ctx.fillStyle = '#FFE636';
-    ctx.beginPath(); ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#FFF176';
-    ctx.beginPath(); ctx.arc(sunX - 6, sunY - 6, sunR * 0.45, 0, Math.PI * 2); ctx.fill();
+    // ── Stars (deterministic, no flicker) ───────────────────────────
+    ctx.fillStyle = '#ffffff';
+    for (let i = 0; i < 120; i++) {
+      const sx = ((Math.sin(i * 127.1) * 0.5 + 0.5) * W) | 0;
+      const sy = ((Math.cos(i * 311.7) * 0.5 + 0.5) * (H * 0.72)) | 0;
+      const sz = (Math.sin(i * 53.3) * 0.5 + 0.5);
+      ctx.globalAlpha = 0.4 + sz * 0.6;
+      const r = sz > 0.75 ? 1.5 : 1;
+      ctx.fillRect(sx, sy, r, r);
+    }
+    ctx.globalAlpha = 1;
 
-    // ── CLOUDS ───────────────────────────────────────────────────────
-    const drawCloud = (cx, cy, scale) => {
-      ctx.fillStyle = 'rgba(255,255,255,0.92)';
-      const puffs = [
-        [0, 0, 28], [-26, 10, 20], [26, 10, 20], [-14, 14, 18], [14, 14, 18]
-      ];
-      puffs.forEach(([ox, oy, r]) => {
-        ctx.beginPath();
-        ctx.arc(cx + ox * scale, cy + oy * scale, r * scale, 0, Math.PI * 2);
-        ctx.fill();
-      });
-    };
-    drawCloud(220, 55,  1.0);
-    drawCloud(480, 40,  1.3);
-    drawCloud(670, 70,  0.8);
-    drawCloud(350, 90,  0.65);
-
-    // ── DISTANT BACKGROUND BUILDINGS (hazy, light) ───────────────────
-    const farBldgs = [
-      { x: 0,   w: 60,  h: 90  },
-      { x: 55,  w: 45,  h: 110 },
-      { x: 95,  w: 70,  h: 75  },
-      { x: 160, w: 50,  h: 95  },
-      { x: 200, w: 65,  h: 80  },
-      { x: 260, w: 40,  h: 100 },
-      { x: 500, w: 55,  h: 95  },
-      { x: 550, w: 70,  h: 70  },
-      { x: 615, w: 45,  h: 105 },
-      { x: 655, w: 60,  h: 85  },
-      { x: 710, w: 50,  h: 90  },
-      { x: 755, w: 45,  h: 75  },
-    ];
-    ctx.fillStyle = 'rgba(176, 213, 240, 0.6)';
-    farBldgs.forEach(b => {
-      ctx.fillRect(b.x, this.H - 80 - b.h, b.w, b.h);
+    // ── Moon ────────────────────────────────────────────────────────
+    const moonX = W - 120, moonY = 65, moonR = 38;
+    // outer glow
+    const moonGlow = ctx.createRadialGradient(moonX, moonY, moonR, moonX, moonY, moonR * 3.2);
+    moonGlow.addColorStop(0,   'rgba(220, 210, 180, 0.18)');
+    moonGlow.addColorStop(1,   'rgba(220, 210, 180, 0)');
+    ctx.fillStyle = moonGlow;
+    ctx.beginPath(); ctx.arc(moonX, moonY, moonR * 3.2, 0, Math.PI * 2); ctx.fill();
+    // disc
+    const moonDisc = ctx.createRadialGradient(moonX - 8, moonY - 8, 4, moonX, moonY, moonR);
+    moonDisc.addColorStop(0, '#fffde0');
+    moonDisc.addColorStop(1, '#d4c98a');
+    ctx.fillStyle = moonDisc;
+    ctx.beginPath(); ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2); ctx.fill();
+    // crater details
+    ctx.fillStyle = 'rgba(160,140,80,0.28)';
+    [[8, -10, 7], [-12, 8, 5], [14, 12, 4], [-5, -18, 3]].forEach(([cx, cy, cr]) => {
+      ctx.beginPath(); ctx.arc(moonX + cx, moonY + cy, cr, 0, Math.PI * 2); ctx.fill();
     });
 
-    // ── TARGETS ──────────────────────────────────────────────────────
+    // ── City horizon haze ────────────────────────────────────────────
+    const haze = ctx.createLinearGradient(0, GROUND - 60, 0, GROUND);
+    haze.addColorStop(0, 'rgba(30,10,80,0)');
+    haze.addColorStop(1, 'rgba(60,20,120,0.45)');
+    ctx.fillStyle = haze;
+    ctx.fillRect(0, GROUND - 60, W, 60);
+
+    // ═══════════════════════════════════════════════════════════════
+    // 2. FAR BACKGROUND BUILDINGS (silhouette layer)
+    // ═══════════════════════════════════════════════════════════════
+    const farBldgs = [
+      { x:   0, w: 55, h:  85 }, { x:  50, w: 40, h: 105 },
+      { x:  85, w: 65, h:  70 }, { x: 145, w: 45, h:  92 },
+      { x: 188, w: 60, h:  78 }, { x: 245, w: 38, h: 100 },
+      { x: 280, w: 50, h:  88 }, { x: 328, w: 42, h:  72 },
+      { x: 368, w: 55, h:  95 }, { x: 420, w: 48, h:  82 },
+      { x: 465, w: 60, h:  68 }, { x: 522, w: 52, h: 108 },
+      { x: 570, w: 65, h:  75 }, { x: 632, w: 44, h:  98 },
+      { x: 672, w: 58, h:  85 }, { x: 728, w: 40, h:  90 },
+      { x: 765, w: 45, h:  72 },
+    ];
+    ctx.fillStyle = '#0a0520';
+    farBldgs.forEach(b => ctx.fillRect(b.x, GROUND - b.h, b.w, b.h));
+
+    // Sparse far-building windows (tiny, warm)
+    farBldgs.forEach(b => {
+      for (let wy = GROUND - b.h + 8; wy < GROUND - 10; wy += 12) {
+        for (let wx = b.x + 5; wx < b.x + b.w - 8; wx += 10) {
+          if ((wx * 3 + wy * 7) % 9 > 5) {
+            ctx.fillStyle = 'rgba(255, 200, 80, 0.55)';
+            ctx.fillRect(wx, wy, 3, 4);
+          }
+        }
+      }
+    });
+
+    // ═══════════════════════════════════════════════════════════════
+    // 3. TARGETS (drawn BEFORE foreground buildings so they go behind)
+    // ═══════════════════════════════════════════════════════════════
     this.targets.forEach(t => {
       if (t.escaped && !t.dead) return;
       if (t.type === 'acrobat') {
-        ctx.strokeStyle = 'rgba(60, 40, 20, 0.6)';
-        ctx.lineWidth = 2;
+        // web line
+        ctx.strokeStyle = 'rgba(200, 200, 255, 0.55)';
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(t.x + (t.vx * 0.3), -200);
+        ctx.moveTo(t.x + t.vx * 0.25, -200);
         ctx.lineTo(t.x, t.y);
         ctx.stroke();
         if (!t.dead) drawGrid(ctx, t.x, t.y, ACROBAT_SWING, PALETTES.acrobat, t.vx > 0, 1.8);
@@ -577,7 +666,7 @@ class GameEngine {
       }
     });
 
-    // ── PARTICLES ────────────────────────────────────────────────────
+    // ── Particles ───────────────────────────────────────────────────
     this.particles.forEach(p => {
       ctx.fillStyle = p.color;
       ctx.globalAlpha = Math.max(0, p.life);
@@ -585,127 +674,289 @@ class GameEngine {
     });
     ctx.globalAlpha = 1.0;
 
-    // ── GROUND STRIP ─────────────────────────────────────────────────
-    // Grass/pavement
-    const ground = ctx.createLinearGradient(0, this.H - 80, 0, this.H);
-    ground.addColorStop(0, '#5d8a3c');
-    ground.addColorStop(0.35, '#4a7a2e');
-    ground.addColorStop(1,   '#3a5e22');
-    ctx.fillStyle = ground;
-    ctx.fillRect(0, this.H - 80, this.W, 80);
+    // ═══════════════════════════════════════════════════════════════
+    // 4. GROUND / ROAD
+    // ═══════════════════════════════════════════════════════════════
+    const groundGrad = ctx.createLinearGradient(0, GROUND, 0, H);
+    groundGrad.addColorStop(0,   '#1a1030');
+    groundGrad.addColorStop(0.3, '#120c22');
+    groundGrad.addColorStop(1,   '#0a0618');
+    ctx.fillStyle = groundGrad;
+    ctx.fillRect(0, GROUND, W, H - GROUND);
 
-    // Road line
-    ctx.fillStyle = '#6b7a4a';
-    ctx.fillRect(0, this.H - 46, this.W, 18);
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    for (let rx = 20; rx < this.W; rx += 60) {
-      ctx.fillRect(rx, this.H - 39, 30, 4);
-    }
+    // Road surface
+    ctx.fillStyle = '#0e0c1e';
+    ctx.fillRect(0, GROUND + 20, W, 35);
 
-    // ── FOREGROUND BUILDINGS ──────────────────────────────────────────
-    // Each building has: x, w, h, color, style ('flat'|'stepped'|'antenna')
+    // Road centre dashes — warm amber, like sodium streetlights
+    ctx.fillStyle = 'rgba(255, 190, 60, 0.5)';
+    for (let rx = 0; rx < W; rx += 55) ctx.fillRect(rx, GROUND + 35, 30, 3);
+
+    // Kerb highlights
+    ctx.fillStyle = 'rgba(100, 80, 200, 0.35)';
+    ctx.fillRect(0, GROUND + 18, W, 3);
+    ctx.fillRect(0, GROUND + 54, W, 2);
+
+    // ═══════════════════════════════════════════════════════════════
+    // 5. FOREGROUND BUILDINGS  — midnight neon-lit skyscrapers
+    //    Also rebuilds this.buildingRects for occlusion
+    // ═══════════════════════════════════════════════════════════════
+    this.buildingRects = [];
+
+    // Helper: draw a neon glow line along an edge
+    const neonLine = (x1, y1, x2, y2, color, alpha = 0.7) => {
+      ctx.save();
+      ctx.shadowColor = color;
+      ctx.shadowBlur  = 8;
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    };
+
     const bldgs = [
-      { x: 10,  w: 75,  h: 155, color: '#e8d5b0', accent: '#c9b98a', style: 'flat'     },
-      { x: 100, w: 55,  h: 110, color: '#b0c4d8', accent: '#8aaac2', style: 'stepped'  },
-      { x: 165, w: 90,  h: 190, color: '#d4e3c3', accent: '#b0cc98', style: 'antenna'  },
-      { x: 268, w: 65,  h: 140, color: '#f5e6c8', accent: '#d9c89a', style: 'flat'     },
-      { x: 348, w: 110, h: 210, color: '#c8d8e8', accent: '#a0bcd0', style: 'stepped'  },
-      { x: 472, w: 70,  h: 160, color: '#e0d0b8', accent: '#c4b090', style: 'antenna'  },
-      { x: 555, w: 55,  h: 120, color: '#cce0cc', accent: '#a8c8a8', style: 'flat'     },
-      { x: 622, w: 85,  h: 175, color: '#dce8f0', accent: '#b4cfe0', style: 'stepped'  },
-      { x: 718, w: 82,  h: 145, color: '#f0dfc8', accent: '#d4bfa0', style: 'flat'     },
+      // x,   w,   h,   body,      neon,        style
+      { x:   5, w: 70,  h: 165, body: '#0d0b1e', neon: '#00e5ff', style: 'tower'    },
+      { x:  88, w: 52,  h: 120, body: '#0e0c1a', neon: '#ff4dff', style: 'flat'     },
+      { x: 152, w: 95,  h: 205, body: '#09081c', neon: '#39ff14', style: 'stepped'  },
+      { x: 260, w: 60,  h: 148, body: '#0c0b1e', neon: '#ff9500', style: 'flat'     },
+      { x: 332, w: 118, h: 230, body: '#080618', neon: '#00e5ff', style: 'tower'    },
+      { x: 462, w: 65,  h: 170, body: '#0d0b1e', neon: '#ff4dff', style: 'stepped'  },
+      { x: 540, w: 58,  h: 130, body: '#0e0c1a', neon: '#39ff14', style: 'flat'     },
+      { x: 610, w: 88,  h: 190, body: '#090818', neon: '#ff9500', style: 'tower'    },
+      { x: 710, w: 85,  h: 155, body: '#0c0b1e', neon: '#00e5ff', style: 'flat'     },
     ];
 
     bldgs.forEach(b => {
-      const bTop = this.H - 80 - b.h;
+      const bTop = GROUND - b.h;
 
-      // Shadow
-      ctx.fillStyle = 'rgba(0,0,0,0.10)';
-      ctx.fillRect(b.x + 6, bTop + 6, b.w, b.h);
+      // Register occlusion rect (full body including any stepped top)
+      const rectTop = b.style === 'stepped' ? bTop - 34 : (b.style === 'tower' ? bTop - 28 : bTop);
+      this.buildingRects.push({ x: b.x, y: rectTop, w: b.w, h: H - rectTop });
 
-      // Main body
-      ctx.fillStyle = b.color;
+      // ── Body ──────────────────────────────────────────────────────
+      ctx.fillStyle = b.body;
       ctx.fillRect(b.x, bTop, b.w, b.h);
 
-      // Accent stripe along top edge
-      ctx.fillStyle = b.accent;
-      ctx.fillRect(b.x, bTop, b.w, 8);
-
-      // Stepped style: a narrower upper block
+      // ── Style-specific topping ─────────────────────────────────────
       if (b.style === 'stepped') {
-        const step = Math.floor(b.w * 0.28);
-        ctx.fillStyle = b.color;
-        ctx.fillRect(b.x + step, bTop - 28, b.w - step * 2, 30);
-        ctx.fillStyle = b.accent;
-        ctx.fillRect(b.x + step, bTop - 28, b.w - step * 2, 6);
+        const step = (b.w * 0.25) | 0;
+        ctx.fillStyle = b.body;
+        ctx.fillRect(b.x + step, bTop - 34, b.w - step * 2, 36);
+        neonLine(b.x + step, bTop - 34, b.x + b.w - step, bTop - 34, b.neon);
+        // antenna
+        const ax = b.x + (b.w / 2) | 0;
+        ctx.fillStyle = '#555';
+        ctx.fillRect(ax - 1, bTop - 54, 3, 22);
+        ctx.fillStyle = b.neon;
+        ctx.shadowColor = b.neon; ctx.shadowBlur = 10;
+        ctx.beginPath(); ctx.arc(ax, bTop - 55, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0;
+      } else if (b.style === 'tower') {
+        // Tapered top block
+        const tp = (b.w * 0.18) | 0;
+        ctx.fillStyle = b.body;
+        ctx.fillRect(b.x + tp, bTop - 28, b.w - tp * 2, 30);
+        neonLine(b.x + tp, bTop - 28, b.x + b.w - tp, bTop - 28, b.neon, 0.9);
+        // spire
+        const sx = b.x + (b.w / 2) | 0;
+        ctx.fillStyle = '#666';
+        ctx.fillRect(sx - 1, bTop - 48, 3, 22);
+        ctx.fillStyle = '#ff2020';
+        ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 14;
+        ctx.beginPath(); ctx.arc(sx, bTop - 50, 3.5, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0;
+      } else {
+        // flat — rooftop ledge + water tower silhouette
+        ctx.fillStyle = '#181430';
+        ctx.fillRect(b.x - 2, bTop - 6, b.w + 4, 8);
+        // water tower
+        const tx = b.x + (b.w * 0.72) | 0;
+        ctx.fillStyle = '#0f0d24';
+        ctx.fillRect(tx, bTop - 22, 14, 18);
+        ctx.fillRect(tx - 2, bTop - 24, 18, 4);
       }
 
-      // Antenna style: thin rod + small ball
-      if (b.style === 'antenna') {
-        const ax = b.x + Math.floor(b.w / 2);
-        ctx.fillStyle = '#888';
-        ctx.fillRect(ax - 2, bTop - 28, 4, 30);
-        ctx.fillStyle = '#e74c3c';
-        ctx.beginPath(); ctx.arc(ax, bTop - 30, 5, 0, Math.PI * 2); ctx.fill();
-      }
+      // ── Neon edge trim ─────────────────────────────────────────────
+      neonLine(b.x,         bTop, b.x,         GROUND, b.neon, 0.4);
+      neonLine(b.x + b.w,   bTop, b.x + b.w,   GROUND, b.neon, 0.4);
+      neonLine(b.x,         bTop, b.x + b.w,   bTop,   b.neon, 0.8);
 
-      // Windows grid
-      const winW = 8, winH = 10, padX = 10, padY = 14, gapX = 12, gapY = 14;
-      for (let wy = bTop + padY; wy < this.H - 80 - padY; wy += winH + gapY) {
+      // ── Neon window glow grid ──────────────────────────────────────
+      const winW = 7, winH = 9, padX = 9, padY = 12, gapX = 11, gapY = 13;
+      for (let wy = bTop + padY; wy < GROUND - 8; wy += winH + gapY) {
         for (let wx = b.x + padX; wx < b.x + b.w - padX - winW; wx += winW + gapX) {
-          // Deterministic lit/unlit based on position
-          const lit = ((Math.floor(wx) * 3 + Math.floor(wy) * 7) % 5) > 1;
-          if (lit) {
-            ctx.fillStyle = 'rgba(200, 230, 255, 0.85)'; // sky-reflected glass
+          const hash = (wx * 13 + wy * 7) % 17;
+          if (hash > 6) {
+            // lit window — warm yellow or neon tint
+            const warm = hash > 11;
+            ctx.fillStyle = warm ? 'rgba(255,210,80,0.75)' : `${b.neon}55`;
+            ctx.shadowColor = warm ? '#ffcc44' : b.neon;
+            ctx.shadowBlur  = warm ? 4 : 6;
+            ctx.fillRect(wx, wy, winW, winH);
           } else {
-            ctx.fillStyle = 'rgba(100, 130, 160, 0.4)';  // darker glass
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = 'rgba(20,15,40,0.9)';
+            ctx.fillRect(wx, wy, winW, winH);
           }
-          ctx.fillRect(wx, wy, winW, winH);
         }
       }
+      ctx.shadowBlur = 0;
 
-      // Rooftop AC units / ledge detail
-      ctx.fillStyle = b.accent;
-      ctx.fillRect(b.x + 4,      bTop + 10, 14, 8);
-      ctx.fillRect(b.x + b.w - 18, bTop + 10, 14, 8);
+      // ── Billboard on taller buildings ─────────────────────────────
+      if (b.h > 160 && b.w > 70) {
+        const bx = b.x + 8, by = bTop + 22, bw = b.w - 16, bh = 22;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.strokeStyle = b.neon;
+        ctx.lineWidth = 1.5;
+        ctx.shadowColor = b.neon; ctx.shadowBlur = 6;
+        ctx.strokeRect(bx, by, bw, bh);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = b.neon;
+        ctx.font = '6px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('NYC', bx + bw / 2, by + 14);
+      }
     });
 
-    // ── MASCOT ───────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════
+    // 5b. GOLDEN SPIDER EASTER EGG
+    //     Sits on the face of the large cyan tower (bldg index 4),
+    //     just below its billboard — looks like a decorative emblem.
+    // ═══════════════════════════════════════════════════════════════
+    if (!this.easterEgg.found) {
+      const eg = this.easterEgg;
+      const pulse = Math.sin(this.eggPulse);
+      const r = eg.r;
+
+      ctx.save();
+      ctx.translate(eg.x, eg.y);
+
+      // Very subtle golden shimmer — dim enough to blend but findable
+      const shimmerAlpha = 0.55 + pulse * 0.20;
+      ctx.globalAlpha = shimmerAlpha;
+
+      // Outer glow ring (very soft — looks like a window reflection)
+      const glow = ctx.createRadialGradient(0, 0, r * 0.4, 0, 0, r * 2.2);
+      glow.addColorStop(0,   'rgba(255, 210, 0, 0.30)');
+      glow.addColorStop(1,   'rgba(255, 210, 0, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath(); ctx.arc(0, 0, r * 2.2, 0, Math.PI * 2); ctx.fill();
+
+      // Body (small amber circle)
+      ctx.shadowColor = '#ffd700';
+      ctx.shadowBlur  = 6 + pulse * 4;
+      ctx.fillStyle   = '#c8960a';
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+
+      // Bright highlight
+      ctx.fillStyle = '#ffe87a';
+      ctx.beginPath(); ctx.arc(-r * 0.28, -r * 0.3, r * 0.38, 0, Math.PI * 2); ctx.fill();
+
+      // 8 legs radiating outward (spider silhouette)
+      ctx.strokeStyle = '#b8860b';
+      ctx.lineWidth   = 1.2;
+      ctx.shadowBlur  = 3;
+      for (let leg = 0; leg < 8; leg++) {
+        const angle  = (leg / 8) * Math.PI * 2;
+        const legLen = r * 1.7;
+        const midX   = Math.cos(angle) * r * 1.1;
+        const midY   = Math.sin(angle) * r * 1.1;
+        const tipX   = Math.cos(angle + 0.28) * legLen;
+        const tipY   = Math.sin(angle + 0.28) * legLen;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(angle) * r * 0.85, Math.sin(angle) * r * 0.85);
+        ctx.quadraticCurveTo(midX, midY, tipX, tipY);
+        ctx.stroke();
+      }
+
+      ctx.shadowBlur  = 0;
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 6. STREET LEVEL — lamp posts + ground fog
+    // ═══════════════════════════════════════════════════════════════
+    // Lamp posts
+    const lamps = [80, 200, 340, 470, 600, 730];
+    lamps.forEach(lx => {
+      // pole
+      ctx.fillStyle = '#1a1830';
+      ctx.fillRect(lx, GROUND - 32, 3, 32);
+      // arm
+      ctx.fillStyle = '#1a1830';
+      ctx.fillRect(lx - 8, GROUND - 32, 12, 3);
+      // light bulb
+      ctx.fillStyle = '#fff8c0';
+      ctx.shadowColor = '#ffee80';
+      ctx.shadowBlur = 18;
+      ctx.beginPath(); ctx.arc(lx - 8, GROUND - 32, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+      // cone of light on road
+      const cone = ctx.createRadialGradient(lx - 8, GROUND - 28, 0, lx - 8, GROUND, 38);
+      cone.addColorStop(0, 'rgba(255, 230, 80, 0.12)');
+      cone.addColorStop(1, 'rgba(255, 230, 80, 0)');
+      ctx.fillStyle = cone;
+      ctx.fillRect(lx - 46, GROUND - 30, 80, 58);
+    });
+
+    // Ground fog strip
+    const fog = ctx.createLinearGradient(0, GROUND + 45, 0, H);
+    fog.addColorStop(0, 'rgba(40, 20, 80, 0.0)');
+    fog.addColorStop(1, 'rgba(40, 20, 80, 0.5)');
+    ctx.fillStyle = fog;
+    ctx.fillRect(0, GROUND + 45, W, H - GROUND - 45);
+
+    // ═══════════════════════════════════════════════════════════════
+    // 7. MASCOT
+    // ═══════════════════════════════════════════════════════════════
     if (this.mascot.active) {
-      const mY = Math.max(this.mascot.y, this.H - 120);
-      drawGrid(ctx, this.W / 2, mY, VIGILANTE_STAND, PALETTES.vigilante, false, 2.5);
+      const mY = Math.max(this.mascot.y, GROUND - 40);
+      drawGrid(ctx, W / 2, mY, VIGILANTE_STAND, PALETTES.vigilante, false, 2.5);
       if (this.mascot.type === 'laugh') {
         const bob = Math.sin(this.mascot.timer * 20) * 5;
-        drawGrid(ctx, this.W / 2, mY + bob, VIGILANTE_STAND, PALETTES.vigilante, false, 2.5);
+        drawGrid(ctx, W / 2, mY + bob, VIGILANTE_STAND, PALETTES.vigilante, false, 2.5);
       }
     }
 
-    // ── FLOATING TEXTS ───────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════
+    // 8. FLOATING TEXTS
+    // ═══════════════════════════════════════════════════════════════
     ctx.textAlign = 'center';
     this.floatingTexts.forEach(ft => {
       ctx.font = ft.isTaunt
-        ? 'bold 16px "Press Start 2P", monospace'
-        : '13px "Press Start 2P", monospace';
+        ? 'bold 15px "Press Start 2P", monospace'
+        : '12px "Press Start 2P", monospace';
       ctx.globalAlpha = Math.max(0, Math.min(1, ft.life * 1.5));
 
       const textWidth = ctx.measureText(ft.text).width;
-      const drawX = Math.max(textWidth / 2 + 20, Math.min(this.W - textWidth / 2 - 20, ft.x));
+      const drawX = Math.max(textWidth / 2 + 20, Math.min(W - textWidth / 2 - 20, ft.x));
 
       if (ft.isTaunt) {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+        ctx.fillStyle = 'rgba(5, 2, 20, 0.92)';
         ctx.fillRect(drawX - textWidth / 2 - 18, ft.y - 22, textWidth + 36, 32);
-        ctx.strokeStyle = '#e74c3c';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#ff4dff';
+        ctx.shadowColor  = '#ff4dff';
+        ctx.shadowBlur   = 8;
+        ctx.lineWidth = 1.5;
         ctx.strokeRect(drawX - textWidth / 2 - 18, ft.y - 22, textWidth + 36, 32);
+        ctx.shadowBlur = 0;
       }
 
-      ctx.fillStyle = ft.color;
-      ctx.strokeStyle = ft.isTaunt ? 'rgba(0,0,0,0.15)' : '#000';
-      ctx.lineWidth = ft.isTaunt ? 1 : 4;
+      ctx.fillStyle   = ft.color;
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth   = 4;
+      ctx.shadowColor = ft.isTaunt ? ft.color : 'transparent';
+      ctx.shadowBlur  = ft.isTaunt ? 6 : 0;
       ctx.strokeText(ft.text, drawX, ft.y);
       ctx.fillText(ft.text, drawX, ft.y);
     });
     ctx.globalAlpha = 1.0;
+    ctx.shadowBlur  = 0;
   }
 
   syncState() {
@@ -719,7 +970,8 @@ class GameEngine {
         maxAmmo: this.maxAmmo,
         history: [...this.history],
         mode: this.mode,
-        gameOverTaunt: this.gameOverTaunt
+        gameOverTaunt: this.gameOverTaunt,
+        eggFound: this.easterEgg.found,
       });
     }
   }
@@ -743,7 +995,8 @@ const App = () => {
     maxAmmo: 5,
     history: new Array(10).fill('empty'),
     mode: 1,
-    gameOverTaunt: ""
+    gameOverTaunt: "",
+    eggFound: false,
   });
 
   const initEngine = useCallback(() => {
@@ -926,6 +1179,16 @@ const App = () => {
             </div>
           </div>
 
+        </div>
+      )}
+      {/* ── EASTER EGG ACHIEVEMENT TOAST ──────────────────────────── */}
+      {gameState.eggFound && (
+        <div className="egg-toast">
+          <span className="egg-icon">🕷️</span>
+          <div className="egg-text">
+            <span className="egg-title">SECRET ACHIEVEMENT UNLOCKED</span>
+            <span className="egg-sub">Friendly Neighborhood Bonus +500</span>
+          </div>
         </div>
       )}
     </div>
