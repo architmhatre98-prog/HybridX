@@ -486,3 +486,27 @@ canvas {
   from { transform: rotate(-180deg) scale(0.4); }
   to   { transform: rotate(0deg)    scale(1);   }
 }
+
+/* ── Spider-Verse golden mode HUD banner ─────────────────────────── */
+.egg-golden-hud {
+  position: absolute;
+  bottom: 11%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  font-family: var(--font);
+  font-size: 1.3vmin;
+  color: #ffd700;
+  letter-spacing: 0.2em;
+  text-shadow:
+    0 0 8px #ffd700,
+    0 0 20px rgba(255, 215, 0, 0.6);
+  pointer-events: none;
+  animation: golden-pulse 0.8s ease-in-out infinite alternate;
+  white-space: nowrap;
+}
+
+@keyframes golden-pulse {
+  from { opacity: 0.75; text-shadow: 0 0 8px #ffd700, 0 0 20px rgba(255,215,0,0.4); }
+  to   { opacity: 1.0;  text-shadow: 0 0 12px #ffd700, 0 0 35px rgba(255,215,0,0.8); }
+}
