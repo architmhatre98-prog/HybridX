@@ -187,14 +187,28 @@ class GameEngine {
     this.gameOverTaunt = "";
 
     // Building occlusion rects — populated in draw(), used in shoot()
-    // Each entry: { x, y, w, h }  (canvas logical coords)
     this.buildingRects = [];
 
-    // ── Easter egg ──────────────────────────────────────────────────
-    // Fixed position on the 5th building (the tall cyan tower at x:332)
-    // Sits just below its billboard, blending with the window row.
-    this.easterEgg = { x: 388, y: 195, r: 9, found: false };
-    this.eggPulse = 0; // drives the subtle shimmer animation
+    // ── Easter egg state machine ────────────────────────────────────
+    // The central NYC tower (bldg index 4, x:332, w:118) has a spire.
+    // Its spire tip is at approximately x=391, y=175 (canvas coords).
+    // Phase 0 → idle: player must click the antenna tip 3 times while
+    //   Spider-Man is hidden behind any building.
+    // Phase 1 → golden spider visible for 0.5 s (click it to activate)
+    // Phase 2 → Spider-Verse golden mode active for 10 s (awarded once)
+    this.egg = {
+      // Antenna hit zone (centre of spire tip on tower bldg index 4)
+      antennaX: 391, antennaY: 175, antennaR: 14,
+      // Golden spider position (appears at the antenna tip)
+      spiderX: 391, spiderY: 160, spiderR: 11,
+      // State: 'idle' | 'spider_visible' | 'golden' | 'done'
+      phase: 'idle',
+      antennaClicks: 0,      // counts clicks on antenna tip
+      spiderTimer: 0,        // countdown while spider is visible (0.5 s)
+      goldenTimer: 0,        // countdown for golden mode (10 s)
+      awarded: false,        // once-per-game guard
+      pulseT: 0,             // animation clock
+    };
     
     this.mascot = { active: false, y: this.H, type: 'laugh', timer: 0 };
     
@@ -208,7 +222,13 @@ class GameEngine {
     this.round = 1;
     this.currentCombo = 0;
     this.gameOverTaunt = "";
-    this.easterEgg.found = false; // reset so it can be found again next game
+    // Reset easter egg for new game
+    this.egg.phase = 'idle';
+    this.egg.antennaClicks = 0;
+    this.egg.spiderTimer = 0;
+    this.egg.goldenTimer = 0;
+    this.egg.awarded = false;
+    this.egg.pulseT = 0;
     
     // Determine Max Ammo based on Difficulty Level
     if (this.mode === 1) this.maxAmmo = 5; // Easy
@@ -307,47 +327,90 @@ class GameEngine {
   }
 
   // --- INPUT ---
-  shoot(x, y) {
-    if (this.state !== 'PLAYING') return;
-    if (this.ammo <= 0) return;
+  // Returns true if the click was consumed by the easter-egg system
+  // (so callers know not to treat it as a normal shot).
+  _handleEggClick(x, y) {
+    const eg = this.egg;
 
-    // Block shot if click is inside a foreground building (target is occluded)
-    const blocked = this.buildingRects.some(
-      r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
-    );
-    if (blocked) return;
+    // Phase 2+ — golden mode running, nothing to click
+    if (eg.phase === 'golden' || eg.phase === 'done') return false;
 
-    // ── Easter egg hit check (before spending ammo, doesn't cost a shot) ──
-    if (!this.easterEgg.found) {
-      const eg = this.easterEgg;
-      if (Math.hypot(x - eg.x, y - eg.y) < eg.r + 8) {
-        eg.found = true;
-        this.score += 500;
-        if (this.score > this.hiScore) {
-          this.hiScore = this.score;
-          localStorage.setItem('retroweb_hi', this.hiScore);
+    // ── Check antenna clicks (phase 0 → idle) ──────────────────────
+    // Condition: click lands on antenna AND at least one target is
+    // currently hidden behind a foreground building.
+    if (eg.phase === 'idle') {
+      const onAntenna = Math.hypot(x - eg.antennaX, y - eg.antennaY) <= eg.antennaR;
+      if (onAntenna) {
+        // Is Spider-Man behind a building right now?
+        const spideyHidden = this.targets.some(t => {
+          if (t.dead || t.escaped || t.type !== 'acrobat') return false;
+          return this.buildingRects.some(
+            r => t.x >= r.x && t.x <= r.x + r.w && t.y >= r.y && t.y <= r.y + r.h
+          );
+        });
+        if (spideyHidden) {
+          eg.antennaClicks++;
+          // Subtle click feedback — tiny spark sound pitch-shift
+          playSound('hit');
+          if (eg.antennaClicks >= 3) {
+            eg.phase = 'spider_visible';
+            eg.spiderTimer = 0.5;
+          }
+        }
+        return true; // antenna click never costs ammo
+      }
+    }
+
+    // ── Check golden spider click (phase 1) ────────────────────────
+    if (eg.phase === 'spider_visible') {
+      const onSpider = Math.hypot(x - eg.spiderX, y - eg.spiderY) <= eg.spiderR + 6;
+      if (onSpider) {
+        eg.phase = 'golden';
+        eg.goldenTimer = 10;
+        if (!eg.awarded) {
+          eg.awarded = true;
+          this.score += 1000;
+          if (this.score > this.hiScore) {
+            this.hiScore = this.score;
+            localStorage.setItem('retroweb_hi', this.hiScore);
+          }
         }
         playSound('easter_egg');
         // Golden screen flash
         const flashEl = document.getElementById('screen-flash');
         if (flashEl) {
           flashEl.style.background = '#ffd700';
-          flashEl.style.opacity = '0.55';
+          flashEl.style.opacity = '0.7';
           setTimeout(() => {
             flashEl.style.opacity = '0';
-            setTimeout(() => { flashEl.style.background = '#fff'; }, 400);
-          }, 180);
+            setTimeout(() => { flashEl.style.background = '#fff'; }, 500);
+          }, 250);
         }
-        // Floating celebration texts on canvas
-        this.floatingTexts.push({ x: eg.x, y: eg.y - 20, text: '+500 SECRET BONUS!', color: '#ffd700', life: 3.5, isTaunt: false, isEgg: true });
-        this.floatingTexts.push({ x: eg.x, y: eg.y - 44, text: 'EASTER EGG FOUND!',  color: '#ffffff', life: 3.5, isTaunt: false, isEgg: true });
-        // Spawn golden particle burst
-        this.spawnExplosion(eg.x, eg.y, '#ffd700');
-        // Notify React for the achievement overlay
+        // Floating celebration texts
+        this.floatingTexts.push({ x: eg.spiderX, y: eg.spiderY - 18, text: '+1000 SPIDER-VERSE BONUS!', color: '#ffd700', life: 3.5, isTaunt: false });
+        this.floatingTexts.push({ x: eg.spiderX, y: eg.spiderY - 40, text: 'SECRET EASTER EGG FOUND!',  color: '#ffffff', life: 3.5, isTaunt: false });
+        this.spawnExplosion(eg.spiderX, eg.spiderY, '#ffd700');
+        for (let i = 0; i < 3; i++) this.spawnExplosion(eg.spiderX + (Math.random()-0.5)*30, eg.spiderY + (Math.random()-0.5)*20, '#ff9500');
         this.syncState();
-        return; // finding the egg doesn't cost a shot
+        return true; // doesn't cost ammo
       }
     }
+
+    return false;
+  }
+
+  shoot(x, y) {
+    if (this.state !== 'PLAYING') return;
+    if (this.ammo <= 0) return;
+
+    // ── Easter egg interaction (consumes click, never costs ammo) ───
+    if (this._handleEggClick(x, y)) return;
+
+    // Block shot if click is inside a foreground building (occlusion)
+    const blocked = this.buildingRects.some(
+      r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+    );
+    if (blocked) return;
 
     this.ammo--;
     this.shotsFired++;
@@ -543,8 +606,24 @@ class GameEngine {
     });
     this.floatingTexts = this.floatingTexts.filter(ft => ft.life > 0);
 
-    // Animate egg shimmer
-    this.eggPulse += dt * 2.8;
+    // ── Easter egg timers ───────────────────────────────────────────
+    const eg = this.egg;
+    eg.pulseT += dt * 3.0;
+    if (eg.phase === 'spider_visible') {
+      eg.spiderTimer -= dt;
+      if (eg.spiderTimer <= 0) {
+        // Missed the window — reset to idle so player can try again
+        eg.phase = 'idle';
+        eg.antennaClicks = 0;
+      }
+    }
+    if (eg.phase === 'golden') {
+      eg.goldenTimer -= dt;
+      if (eg.goldenTimer <= 0) {
+        eg.phase = 'done';
+        this.syncState();
+      }
+    }
   }
 
   checkRoundClear() {
@@ -650,17 +729,31 @@ class GameEngine {
     // ═══════════════════════════════════════════════════════════════
     // 3. TARGETS (drawn BEFORE foreground buildings so they go behind)
     // ═══════════════════════════════════════════════════════════════
+    const goldenMode = this.egg.phase === 'golden';
+    const acrobatPal = goldenMode
+      ? { R: '#ffd700', B: '#b8860b', W: '#fffde0' }
+      : PALETTES.acrobat;
+
     this.targets.forEach(t => {
       if (t.escaped && !t.dead) return;
       if (t.type === 'acrobat') {
         // web line
-        ctx.strokeStyle = 'rgba(200, 200, 255, 0.55)';
+        ctx.strokeStyle = goldenMode ? 'rgba(255,215,0,0.65)' : 'rgba(200, 200, 255, 0.55)';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(t.x + t.vx * 0.25, -200);
         ctx.lineTo(t.x, t.y);
         ctx.stroke();
-        if (!t.dead) drawGrid(ctx, t.x, t.y, ACROBAT_SWING, PALETTES.acrobat, t.vx > 0, 1.8);
+        if (goldenMode && !t.dead) {
+          // golden aura
+          ctx.save();
+          ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 16;
+          ctx.globalAlpha = 0.3 + Math.sin(this.egg.pulseT * 3) * 0.1;
+          ctx.fillStyle = '#ffd700';
+          ctx.beginPath(); ctx.arc(t.x, t.y, 22, 0, Math.PI * 2); ctx.fill();
+          ctx.restore(); ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+        }
+        if (!t.dead) drawGrid(ctx, t.x, t.y, ACROBAT_SWING, acrobatPal, t.vx > 0, 1.8);
       } else if (t.type === 'drone') {
         if (!t.dead) drawGrid(ctx, t.x, t.y, DRONE_SPRITE, PALETTES.drone, false, t.scale);
       }
@@ -823,59 +916,77 @@ class GameEngine {
     });
 
     // ═══════════════════════════════════════════════════════════════
-    // 5b. GOLDEN SPIDER EASTER EGG
-    //     Sits on the face of the large cyan tower (bldg index 4),
-    //     just below its billboard — looks like a decorative emblem.
+    // 5b. EASTER EGG VISUALS
     // ═══════════════════════════════════════════════════════════════
-    if (!this.easterEgg.found) {
-      const eg = this.easterEgg;
-      const pulse = Math.sin(this.eggPulse);
-      const r = eg.r;
+    const eg = this.egg;
+    const pt = eg.pulseT;
 
+    // ── Phase 0 (idle): draw the antenna tip with a faint golden ring
+    //    after at least 1 click — gives subtle feedback without spoiling it.
+    if (eg.phase === 'idle' && eg.antennaClicks > 0) {
       ctx.save();
-      ctx.translate(eg.x, eg.y);
+      ctx.globalAlpha = 0.18 + Math.sin(pt) * 0.10;
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth = 1.5;
+      ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.arc(eg.antennaX, eg.antennaY, 10 + eg.antennaClicks * 3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+      ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+    }
 
-      // Very subtle golden shimmer — dim enough to blend but findable
-      const shimmerAlpha = 0.55 + pulse * 0.20;
-      ctx.globalAlpha = shimmerAlpha;
+    // ── Phase 1 (spider_visible): draw the clickable golden spider ──
+    if (eg.phase === 'spider_visible') {
+      const fade = Math.min(1, eg.spiderTimer / 0.15); // fade-in over 0.15s
+      const r = eg.spiderR;
+      ctx.save();
+      ctx.translate(eg.spiderX, eg.spiderY);
+      ctx.globalAlpha = fade;
 
-      // Outer glow ring (very soft — looks like a window reflection)
-      const glow = ctx.createRadialGradient(0, 0, r * 0.4, 0, 0, r * 2.2);
-      glow.addColorStop(0,   'rgba(255, 210, 0, 0.30)');
-      glow.addColorStop(1,   'rgba(255, 210, 0, 0)');
+      // Glow aura
+      const glow = ctx.createRadialGradient(0, 0, r * 0.5, 0, 0, r * 2.8);
+      glow.addColorStop(0, 'rgba(255,215,0,0.55)');
+      glow.addColorStop(1, 'rgba(255,215,0,0)');
       ctx.fillStyle = glow;
-      ctx.beginPath(); ctx.arc(0, 0, r * 2.2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 0, r * 2.8, 0, Math.PI * 2); ctx.fill();
 
-      // Body (small amber circle)
-      ctx.shadowColor = '#ffd700';
-      ctx.shadowBlur  = 6 + pulse * 4;
-      ctx.fillStyle   = '#c8960a';
+      // Body
+      ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 12 + Math.sin(pt * 4) * 4;
+      ctx.fillStyle = '#c8960a';
       ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
-
-      // Bright highlight
       ctx.fillStyle = '#ffe87a';
-      ctx.beginPath(); ctx.arc(-r * 0.28, -r * 0.3, r * 0.38, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(-r*0.28, -r*0.3, r*0.38, 0, Math.PI * 2); ctx.fill();
 
-      // 8 legs radiating outward (spider silhouette)
-      ctx.strokeStyle = '#b8860b';
-      ctx.lineWidth   = 1.2;
-      ctx.shadowBlur  = 3;
+      // Legs
+      ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 1.4; ctx.shadowBlur = 4;
       for (let leg = 0; leg < 8; leg++) {
-        const angle  = (leg / 8) * Math.PI * 2;
-        const legLen = r * 1.7;
-        const midX   = Math.cos(angle) * r * 1.1;
-        const midY   = Math.sin(angle) * r * 1.1;
-        const tipX   = Math.cos(angle + 0.28) * legLen;
-        const tipY   = Math.sin(angle + 0.28) * legLen;
+        const a = (leg / 8) * Math.PI * 2;
+        const lx = Math.cos(a + 0.3) * r * 1.8, ly = Math.sin(a + 0.3) * r * 1.8;
         ctx.beginPath();
-        ctx.moveTo(Math.cos(angle) * r * 0.85, Math.sin(angle) * r * 0.85);
-        ctx.quadraticCurveTo(midX, midY, tipX, tipY);
+        ctx.moveTo(Math.cos(a)*r*0.9, Math.sin(a)*r*0.9);
+        ctx.quadraticCurveTo(Math.cos(a)*r*1.1, Math.sin(a)*r*1.1, lx, ly);
         ctx.stroke();
       }
-
-      ctx.shadowBlur  = 0;
-      ctx.globalAlpha = 1;
       ctx.restore();
+      ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+    }
+
+    // ── Phase 2 (golden): golden shimmer overlay on mascot handled in draw §7.
+    //    Also draw a crown above the tower spire.
+    if (eg.phase === 'golden') {
+      // Central tower spire crown effect
+      const cx = eg.antennaX, cy = eg.antennaY - 12;
+      ctx.save();
+      ctx.globalAlpha = 0.6 + Math.sin(pt * 2) * 0.2;
+      ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 20;
+      ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(cx, cy, 14, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = 0.25 + Math.sin(pt * 2) * 0.1;
+      ctx.fillStyle = '#ffd700';
+      ctx.beginPath(); ctx.arc(cx, cy, 14, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      ctx.globalAlpha = 1; ctx.shadowBlur = 0;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -912,14 +1023,27 @@ class GameEngine {
     ctx.fillRect(0, GROUND + 45, W, H - GROUND - 45);
 
     // ═══════════════════════════════════════════════════════════════
-    // 7. MASCOT
+    // 7. MASCOT  — golden palette during Spider-Verse mode
     // ═══════════════════════════════════════════════════════════════
     if (this.mascot.active) {
       const mY = Math.max(this.mascot.y, GROUND - 40);
-      drawGrid(ctx, W / 2, mY, VIGILANTE_STAND, PALETTES.vigilante, false, 2.5);
+      const isGolden = this.egg.phase === 'golden';
+      const mascotPal = isGolden
+        ? { F: '#ffd700', K: '#b8860b', W: '#fffde0' }   // golden Spider-Man
+        : PALETTES.vigilante;
+      if (isGolden) {
+        // Aura glow behind mascot
+        ctx.save();
+        ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 30;
+        ctx.globalAlpha = 0.35 + Math.sin(this.egg.pulseT * 2) * 0.15;
+        ctx.fillStyle = '#ffd700';
+        ctx.beginPath(); ctx.arc(W / 2, mY - 10, 28, 0, Math.PI * 2); ctx.fill();
+        ctx.restore(); ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+      }
+      drawGrid(ctx, W / 2, mY, VIGILANTE_STAND, mascotPal, false, 2.5);
       if (this.mascot.type === 'laugh') {
         const bob = Math.sin(this.mascot.timer * 20) * 5;
-        drawGrid(ctx, W / 2, mY + bob, VIGILANTE_STAND, PALETTES.vigilante, false, 2.5);
+        drawGrid(ctx, W / 2, mY + bob, VIGILANTE_STAND, mascotPal, false, 2.5);
       }
     }
 
@@ -971,7 +1095,8 @@ class GameEngine {
         history: [...this.history],
         mode: this.mode,
         gameOverTaunt: this.gameOverTaunt,
-        eggFound: this.easterEgg.found,
+        eggPhase: this.egg.phase,    // 'idle'|'spider_visible'|'golden'|'done'
+        eggFound: this.egg.awarded,  // once awarded, toast stays visible
       });
     }
   }
@@ -996,6 +1121,7 @@ const App = () => {
     history: new Array(10).fill('empty'),
     mode: 1,
     gameOverTaunt: "",
+    eggPhase: 'idle',
     eggFound: false,
   });
 
@@ -1047,12 +1173,26 @@ const App = () => {
     eng.shoot(x, y);
   };
 
+  // Touch support — mirrors click handler, prevents scroll/zoom on game canvas
+  const handleCanvasTouch = (e) => {
+    e.preventDefault();
+    const eng = engineRef.current;
+    if (!eng || eng.state !== 'PLAYING') return;
+    const touch = e.changedTouches[0];
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = canvasRef.current.width / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
+    const x = (touch.clientX - rect.left) * scaleX;
+    const y = (touch.clientY - rect.top)  * scaleY;
+    eng.shoot(x, y);
+  };
+
   const modeNames = { 1: 'EASY', 2: 'MEDIUM', 3: 'HARD' };
   const modeBadgeClass = { 1: 'badge-easy', 2: 'badge-medium', 3: 'badge-hard' };
 
   return (
     <div className="game-area">
-      <canvas ref={canvasRef} onClick={handleCanvasClick} />
+      <canvas ref={canvasRef} onClick={handleCanvasClick} onTouchStart={handleCanvasTouch} />
       <div className="crt-overlay" />
       <div id="screen-flash" className="flash" />
 
@@ -1183,13 +1323,17 @@ const App = () => {
       )}
       {/* ── EASTER EGG ACHIEVEMENT TOAST ──────────────────────────── */}
       {gameState.eggFound && (
-        <div className="egg-toast">
+        <div className="egg-toast" key="egg-toast">
           <span className="egg-icon">🕷️</span>
           <div className="egg-text">
-            <span className="egg-title">SECRET ACHIEVEMENT UNLOCKED</span>
-            <span className="egg-sub">Friendly Neighborhood Bonus +500</span>
+            <span className="egg-title">SECRET EASTER EGG FOUND!</span>
+            <span className="egg-sub">Friendly Neighborhood Bonus +1000</span>
           </div>
         </div>
+      )}
+      {/* ── GOLDEN MODE HUD INDICATOR ─────────────────────────────── */}
+      {gameState.eggPhase === 'golden' && (
+        <div className="egg-golden-hud">✦ SPIDER-VERSE MODE ✦</div>
       )}
     </div>
   );
